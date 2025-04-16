@@ -16,11 +16,11 @@ import (
 )
 
 var (
-	serverAddr    string
-	serverRootDir string
-	defaultUser   string
-	defaultPass   string
-	enablePubKey  bool
+	serverAddr            string
+	serverRootDir         string
+	defaultUser           string
+	defaultPass           string
+	defaultUserPubKeyFile string
 )
 
 // serverCmd represents the server command
@@ -28,7 +28,9 @@ var serverCmd = &cobra.Command{
 	Use:   "server",
 	Short: "Start the SFTP server",
 	Long: `Start the SFTP server with the specified configuration.
-The server will listen for incoming connections and handle file transfers.`,
+The server will listen for incoming connections and handle file transfers.
+To enable public key authentication for the default user, provide their
+public key file using the --pubkey-file flag.`,
 	Run: func(cmd *cobra.Command, args []string) {
 		startServer()
 	},
@@ -42,7 +44,7 @@ func init() {
 	serverCmd.Flags().StringVarP(&serverRootDir, "root", "r", "", "Root directory for the server (default: temp directory)")
 	serverCmd.Flags().StringVarP(&defaultUser, "user", "u", "", "Create a default user with this username")
 	serverCmd.Flags().StringVarP(&defaultPass, "password", "p", "", "Password for the default user")
-	serverCmd.Flags().BoolVarP(&enablePubKey, "enable-pubkey", "k", false, "Enable public key authentication for the default user")
+	serverCmd.Flags().StringVarP(&defaultUserPubKeyFile, "pubkey-file", "k", "", "Path to the default user's public key file (PEM format) for public key authentication")
 }
 
 func startServer() {
@@ -83,33 +85,47 @@ func startServer() {
 	// Create default user if credentials provided
 	if defaultUser != "" {
 		var pkPEM []byte
-		if enablePubKey {
-			pkKeyPair, err := sftp.GenerateKeyPair()
+		// If a public key file is provided, read it.
+		if defaultUserPubKeyFile != "" {
+			pkPEM, err = ioutil.ReadFile(defaultUserPubKeyFile)
 			if err != nil {
-				log.Fatalf("Failed to generate key pair: %v", err)
+				log.Fatalf("Failed to read public key file %s: %v", defaultUserPubKeyFile, err)
 			}
-			pkPEM, err = sftp.EncodePublicKey(&pkKeyPair.PrivateKey.PublicKey)
+			_, err = sftp.DecodePublicKey(pkPEM)
 			if err != nil {
-				log.Fatalf("Failed to encode public key: %v", err)
+				log.Fatalf("Invalid public key format in %s: %v", defaultUserPubKeyFile, err)
 			}
+			fmt.Printf("Read public key for %s from %s\n", defaultUser, defaultUserPubKeyFile)
 
 			// Save private key to a file for the user
-			privKeyFile := filepath.Join(serverDir, defaultUser+".key")
-			privKeyPEM, err := sftp.EncodePrivateKey(pkKeyPair.PrivateKey)
-			if err != nil {
-				log.Fatalf("Failed to encode private key: %v", err)
-			}
-			if err := ioutil.WriteFile(privKeyFile, privKeyPEM, 0600); err != nil {
-				log.Fatalf("Failed to save private key: %v", err)
-			}
-			fmt.Printf("Generated private key for %s: %s\n", defaultUser, privKeyFile)
+			// 	privKeyFile := filepath.Join(serverDir, defaultUser+".key")
+			// 	privKeyPEM, err := sftp.EncodePrivateKey(pkKeyPair.PrivateKey)
+			// 	if err != nil {
+			// 		log.Fatalf("Failed to encode private key: %v", err)
+			// 	}
+			// 	if err := ioutil.WriteFile(privKeyFile, privKeyPEM, 0600); err != nil {
+			// 		log.Fatalf("Failed to save private key: %v", err)
+			// 	}
+			// 	fmt.Printf("Generated private key for %s: %s\n", defaultUser, privKeyFile)
 		}
 
 		err = auth.RegisterUser(defaultUser, defaultPass, pkPEM)
 		if err != nil {
 			log.Fatalf("Failed to register default user: %v", err)
 		}
-		fmt.Printf("Registered user: %s\n", defaultUser)
+		authMethods := []string{}
+		if defaultPass != "" {
+			authMethods = append(authMethods, "password")
+		}
+		if len(pkPEM) > 0 {
+			authMethods = append(authMethods, "public key")
+		}
+		if len(authMethods) > 0 {
+			fmt.Printf("Registered user: %s (Auth methods: %v)\n", defaultUser, authMethods)
+		} else {
+			log.Printf("Warning: Registered user %s with no authentication methods configured.", defaultUser)
+		}
+
 	}
 
 	// Start server

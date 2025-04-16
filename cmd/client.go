@@ -3,6 +3,7 @@ package cmd
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"path/filepath" // Needed for download command
 	"sftp-protocol/network"
@@ -515,6 +516,76 @@ Requires either a password (-p) or an identity file (-i) for authentication.`,
 	},
 }
 
+var keygenCmd = &cobra.Command{
+	Use:   "keygen -o <output_file_base>",
+	Short: "Generate a new ECDSA key pair for SFTP authentication",
+	Long: `Generates a new ECDSA private and public key pair suitable for use with this SFTP client/server.
+The private key will be saved to <output_file_base> and the public key to <output_file_base>.pub.
+Use the public key file with the server's --pubkey-file flag and the private key file
+with the client's -i flag for authentication.`,
+	Run: func(cmd *cobra.Command, args []string) {
+		outputBase, _ := cmd.Flags().GetString("output")
+		force, _ := cmd.Flags().GetBool("force")
+
+		if outputBase == "" {
+			log.Fatal("Error: Output file base path (-o, --output) is required.")
+			return // Redundant, log.Fatal exits
+		}
+
+		privKeyPath := outputBase
+		pubKeyPath := outputBase + ".pub"
+
+		// Check if files exist
+		if !force {
+			_, errPriv := os.Stat(privKeyPath)
+			_, errPub := os.Stat(pubKeyPath)
+			if errPriv == nil || errPub == nil { // If either exists without error
+				log.Fatalf("Error: Output file(s) '%s' or '%s' already exist. Use --force to overwrite.", privKeyPath, pubKeyPath)
+				return // Redundant
+			}
+		}
+
+		fmt.Printf("Generating ECDSA key pair (using curve P-384 )...\n") // Assuming DefaultCurve is exported from sftp
+
+		// Generate the keys using the helper from sftp package
+		keyPair, err := sftp.GenerateKeyPair()
+		if err != nil {
+			log.Fatalf("Error generating key pair: %v", err)
+		}
+
+		// Encode keys to PEM format
+		privKeyPEM, err := sftp.EncodePrivateKey(keyPair.PrivateKey)
+		if err != nil {
+			log.Fatalf("Error encoding private key: %v", err)
+		}
+
+		pubKeyPEM, err := sftp.EncodePublicKey(&keyPair.PrivateKey.PublicKey)
+		if err != nil {
+			log.Fatalf("Error encoding public key: %v", err)
+		}
+
+		// Write private key file (secure permissions)
+		err = os.WriteFile(privKeyPath, privKeyPEM, 0600)
+		if err != nil {
+			log.Fatalf("Error writing private key file '%s': %v", privKeyPath, err)
+		}
+		fmt.Printf("Private key saved to: %s\n", privKeyPath)
+
+		// Write public key file
+		err = os.WriteFile(pubKeyPath, pubKeyPEM, 0644)
+		if err != nil {
+			// Attempt to clean up private key file if public key write fails
+			os.Remove(privKeyPath)
+			log.Fatalf("Error writing public key file '%s': %v", pubKeyPath, err)
+		}
+		fmt.Printf("Public key saved to: %s\n", pubKeyPath)
+
+		fmt.Println("\nKey generation complete.")
+		fmt.Printf("Use '%s' with the client's -i flag.\n", privKeyPath)
+		fmt.Printf("Use '%s' with the server's --pubkey-file flag.\n", pubKeyPath)
+	},
+}
+
 func init() {
 	rootCmd.AddCommand(clientCmd)
 
@@ -555,4 +626,10 @@ func init() {
 	lsCmd.Flags().StringP("password", "p", "", "Password for authentication (optional if -i provided)")
 	lsCmd.Flags().StringP("identity-file", "i", "", "Path to private key file for auth (optional if -p provided)")
 	lsCmd.MarkFlagRequired("username")
+
+	// --- KeyGen Command Flags ---
+	clientCmd.AddCommand(keygenCmd)
+	keygenCmd.Flags().StringP("output", "o", "", "Base path/filename for the key files (e.g., 'my_key') - REQUIRED")
+	keygenCmd.Flags().BoolP("force", "f", false, "Overwrite existing key files")
+	keygenCmd.MarkFlagRequired("output")
 }
